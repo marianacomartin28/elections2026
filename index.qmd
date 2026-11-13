@@ -1,8 +1,9 @@
 ---
-title: "2026 North Carolina U.S. Senate Election"
+title: "North Carolina 2026 General Election Explorer"
+toc: false
 ---
 
-Interactive county-level results from the November 3, 2026 North Carolina U.S. Senate election (data from the NC State Board of Elections). Hover or click any county to see vote totals and percentages.
+Explore official precinct-tabulated results from the **November 3, 2026** North Carolina general election across all 100 counties. Use the **top-right map control** to switch races or toggle county vote-volume bubbles, and hover over any county for a full breakdown.
 
 ```{r}
 #| echo: false
@@ -13,72 +14,271 @@ library(tidyverse)
 library(sf)
 library(tigris)
 library(leaflet)
+library(plotly)
+library(DT)
 
 options(tigris_use_cache = TRUE)
 
-# Read precinct results from the NCSBE zip file and sum US Senate votes by county
-senate_county <- read_tsv(
+# Read NCSBE 2026 precinct file once
+raw_results <- read_tsv(
   unz("data/results_pct_20261103.zip", "results_pct_20261103.txt"),
   show_col_types = FALSE
-) |>
-  filter(`Contest Name` == "US SENATE") |>
-  summarize(
-    dem_votes = sum(`Total Votes`[`Choice Party` == "DEM"], na.rm = TRUE),
-    rep_votes = sum(`Total Votes`[`Choice Party` == "REP"], na.rm = TRUE),
-    total_votes = sum(`Total Votes`, na.rm = TRUE),
-    .by = County
-  ) |>
-  mutate(
-    dem_pct = dem_votes / total_votes * 100,
-    rep_pct = rep_votes / total_votes * 100,
-    # Positive = Cooper (DEM) lead; negative = Whatley (REP) lead
-    dem_margin = dem_pct - rep_pct
-  )
+)
 
-# Download NC county shapes, convert to WGS84 for leaflet, and join vote totals
+# Summarize DEM vs REP votes, voting methods, and margin by county
+summarize_race <- \(df, prefix) {
+  df |>
+    summarize(
+      dem = sum(`Total Votes`[`Choice Party` == "DEM"], na.rm = TRUE),
+      rep = sum(`Total Votes`[`Choice Party` == "REP"], na.rm = TRUE),
+      total = sum(`Total Votes`, na.rm = TRUE),
+      early = sum(`Early Voting`, na.rm = TRUE),
+      eday = sum(`Election Day`, na.rm = TRUE),
+      .by = County
+    ) |>
+    mutate(
+      dem_pct = dem / total * 100,
+      rep_pct = rep / total * 100,
+      margin = dem_pct - rep_pct
+    ) |>
+    rename_with(\(col) paste0(prefix, "_", col), -County)
+}
+
+# Summarize three major 2026 contests across all 100 counties
+senate <- raw_results |>
+  filter(`Contest Name` == "US SENATE") |>
+  summarize_race("sen")
+
+scourt <- raw_results |>
+  filter(`Contest Name` == "NC SUPREME COURT ASSOCIATE JUSTICE SEAT 01") |>
+  summarize_race("sc")
+
+uhouse <- raw_results |>
+  filter(str_starts(`Contest Name`, "US HOUSE OF REPRESENTATIVES")) |>
+  summarize_race("uh")
+
+# Join race summaries to NC county shapes (converted to WGS84 for leaflet)
 nc_map <- counties(state = "NC", cb = TRUE, progress_bar = FALSE) |>
   st_transform(4326) |>
   mutate(County = str_to_upper(NAME)) |>
-  left_join(senate_county, by = "County") |>
+  left_join(senate, by = "County") |>
+  left_join(scourt, by = "County") |>
+  left_join(uhouse, by = "County") |>
   mutate(
-    label_html = paste0(
-      "<strong>", NAME, " County</strong><br/>",
-      "Roy Cooper (DEM): ", scales::comma(dem_votes),
-      " (", sprintf("%.1f%%", dem_pct), ")<br/>",
-      "Michael Whatley (REP): ", scales::comma(rep_votes),
-      " (", sprintf("%.1f%%", rep_pct), ")<br/>",
-      "Total votes: ", scales::comma(total_votes)
+    early_share = sen_early / sen_total * 100,
+    # Build a rich HTML hover card showing all 3 races + voting method
+    tooltip_html = paste0(
+      "<div style='font-family:system-ui; min-width:230px;'>",
+      "<div style='font-size:15px; font-weight:700; border-bottom:1px solid #ddd; padding-bottom:4px; margin-bottom:6px;'>",
+      NAME, " County</div>",
+      "<b>U.S. Senate:</b> Cooper ", sprintf("%.1f%%", sen_dem_pct),
+      " vs. Whatley ", sprintf("%.1f%%", sen_rep_pct), "<br/>",
+      "<b>NC Supreme Ct:</b> Earls ", sprintf("%.1f%%", sc_dem_pct),
+      " vs. Stevens ", sprintf("%.1f%%", sc_rep_pct), "<br/>",
+      "<b>U.S. House (all dist.):</b> DEM ", sprintf("%.1f%%", uh_dem_pct),
+      " vs. REP ", sprintf("%.1f%%", uh_rep_pct), "<hr style='margin:6px 0;'/>",
+      "<b>Total Ballots (Senate):</b> ", scales::comma(sen_total), "<br/>",
+      "<b>Early Voting Share:</b> ", sprintf("%.1f%%", early_share),
+      "</div>"
     ) |>
       map(htmltools::HTML)
   )
 
-# Symmetric red-blue color scale centered at a 0% tie
-max_margin <- max(abs(nc_map$dem_margin), na.rm = TRUE)
+# Compute county center coordinates for the optional vote-volume bubble layer
+centers <- st_coordinates(st_centroid(st_geometry(nc_map)))
+nc_map <- nc_map |>
+  mutate(lng = centers[, 1], lat = centers[, 2])
+
+# Statewide totals for top summary cards
+sw_sen_dem <- sum(nc_map$sen_dem) / sum(nc_map$sen_total) * 100
+sw_sc_dem  <- sum(nc_map$sc_dem) / sum(nc_map$sc_total) * 100
+sw_uh_dem  <- sum(nc_map$uh_dem) / sum(nc_map$uh_total) * 100
+sw_total   <- sum(nc_map$sen_total)
+sw_early   <- sum(nc_map$sen_early) / sw_total * 100
+```
+
+```{r}
+#| echo: false
+htmltools::HTML(paste0(
+  "<div class='stat-grid'>",
+  "<div class='stat-card'><div class='stat-label'>U.S. Senate Winner</div>",
+  "<div class='stat-value'>Roy Cooper (D)</div>",
+  "<div class='stat-sub'>", sprintf("%.1f%%", sw_sen_dem), " statewide (",
+  scales::comma(sum(nc_map$sen_dem)), " votes)</div></div>",
+
+  "<div class='stat-card'><div class='stat-label'>NC Supreme Court Seat 1</div>",
+  "<div class='stat-value'>Anita Earls (D)</div>",
+  "<div class='stat-sub'>", sprintf("%.1f%%", sw_sc_dem), " statewide (",
+  scales::comma(sum(nc_map$sc_dem)), " votes)</div></div>",
+
+  "<div class='stat-card'><div class='stat-label'>U.S. House Statewide Vote</div>",
+  "<div class='stat-value'>DEM ", sprintf("%.1f%%", sw_uh_dem), "</div>",
+  "<div class='stat-sub'>Across all 14 NC congressional districts</div></div>",
+
+  "<div class='stat-card turnout'><div class='stat-label'>Total Votes & Early Voting</div>",
+  "<div class='stat-value'>", scales::comma(sw_total), "</div>",
+  "<div class='stat-sub'>", sprintf("%.1f%%", sw_early), " cast via Early Voting</div></div>",
+  "</div>"
+))
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+# Diverging red-white-blue palette centered at 0% margin
+max_m <- 65
 pal <- colorNumeric(
-  palette = "RdBu",
-  domain = c(-max_margin, max_margin)
+  palette = c("#991b1b", "#ef4444", "#f8fafc", "#3b82f6", "#1d4ed8"),
+  domain = c(-max_m, max_m),
+  na.color = "#6b7280"
 )
 
-leaflet(nc_map) |>
-  addProviderTiles(providers$CartoDB.Positron) |>
+# Clamp extreme margins slightly so colors stay vivid across counties
+clamp_m <- \(x) pmax(pmin(x, max_m), -max_m)
+
+leaflet(nc_map, height = "560px") |>
+  addMapPane("labels", zIndex = 450) |>
+  # Crisp dark basemap underneath + city labels floating above county colors
+  addProviderTiles(providers$CartoDB.DarkMatterNoLabels) |>
+  addProviderTiles(
+    providers$CartoDB.DarkMatterOnlyLabels,
+    options = providerTileOptions(pane = "labels")
+  ) |>
+  # Layer 1: U.S. Senate
   addPolygons(
-    fillColor = ~ pal(dem_margin),
-    fillOpacity = 0.75,
-    color = "#444444",
+    group = "U.S. Senate",
+    fillColor = ~ pal(clamp_m(sen_margin)),
+    fillOpacity = 0.82,
+    color = "#1f2937",
     weight = 1,
-    label = ~label_html,
+    label = ~tooltip_html,
     highlightOptions = highlightOptions(
-      weight = 2.5,
-      color = "#000000",
-      fillOpacity = 0.9,
-      bringToFront = TRUE
+      weight = 2.5, color = "#ffffff", fillOpacity = 0.95, bringToFront = TRUE
     )
   ) |>
+  # Layer 2: NC Supreme Court
+  addPolygons(
+    group = "NC Supreme Court",
+    fillColor = ~ pal(clamp_m(sc_margin)),
+    fillOpacity = 0.82,
+    color = "#1f2937",
+    weight = 1,
+    label = ~tooltip_html,
+    highlightOptions = highlightOptions(
+      weight = 2.5, color = "#ffffff", fillOpacity = 0.95, bringToFront = TRUE
+    )
+  ) |>
+  # Layer 3: U.S. House by County
+  addPolygons(
+    group = "U.S. House",
+    fillColor = ~ pal(clamp_m(uh_margin)),
+    fillOpacity = 0.82,
+    color = "#1f2937",
+    weight = 1,
+    label = ~tooltip_html,
+    highlightOptions = highlightOptions(
+      weight = 2.5, color = "#ffffff", fillOpacity = 0.95, bringToFront = TRUE
+    )
+  ) |>
+  # Optional overlay: county vote-volume circles sized by total votes
+  addCircleMarkers(
+    lng = ~lng,
+    lat = ~lat,
+    group = "Vote Volume Bubbles",
+    radius = ~ sqrt(sen_total) / 28,
+    fillColor = "#fbbf24",
+    fillOpacity = 0.45,
+    color = "#fde68a",
+    weight = 1.2,
+    label = ~tooltip_html
+  ) |>
+  addLayersControl(
+    baseGroups = c("U.S. Senate", "NC Supreme Court", "U.S. House"),
+    overlayGroups = c("Vote Volume Bubbles"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) |>
+  hideGroup("Vote Volume Bubbles") |>
   addLegend(
     position = "bottomright",
     pal = pal,
-    values = c(-max_margin, max_margin),
-    title = "Margin (DEM - REP)",
+    values = c(-max_m, max_m),
+    title = "Margin (DEM − REP)",
     labFormat = labelFormat(suffix = "%")
   )
 ```
+
+<br/>
+
+::: {.panel-tabset}
+
+### Early Voting vs. Senate Margin
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+# Interactive scatter plot sized by county vote volume
+p <- nc_map |>
+  st_drop_geometry() |>
+  mutate(
+    Winner = if_else(sen_margin >= 0, "Cooper (DEM)", "Whatley (REP)"),
+    hover_txt = paste0(
+      NAME, " County\n",
+      "Senate Margin: ", sprintf("%+.1f%%", sen_margin), "\n",
+      "Early Voting: ", sprintf("%.1f%%", early_share), "\n",
+      "Total Votes: ", scales::comma(sen_total)
+    )
+  ) |>
+  ggplot(aes(
+    x = early_share,
+    y = sen_margin,
+    size = sen_total,
+    color = Winner,
+    text = hover_txt
+  )) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(alpha = 0.75) +
+  scale_color_manual(values = c("Cooper (DEM)" = "#2563eb", "Whatley (REP)" = "#dc2626")) +
+  scale_size_continuous(range = c(3, 16), guide = "none") +
+  labs(
+    title = "Early Voting Share vs. U.S. Senate Margin by County",
+    x = "Votes Cast Early (%)",
+    y = "Senate Margin (DEM − REP %)"
+  ) +
+  theme_minimal()
+
+ggplotly(p, tooltip = "text")
+```
+
+### Search All 100 Counties
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+# Searchable, sortable table of all 100 North Carolina counties
+nc_map |>
+  st_drop_geometry() |>
+  transmute(
+    County = NAME,
+    `Total Votes` = sen_total,
+    `Senate DEM %` = round(sen_dem_pct, 1),
+    `Senate REP %` = round(sen_rep_pct, 1),
+    `Senate Margin` = round(sen_margin, 1),
+    `Supreme Ct DEM %` = round(sc_dem_pct, 1),
+    `U.S. House DEM %` = round(uh_dem_pct, 1),
+    `Early Vote %` = round(early_share, 1)
+  ) |>
+  arrange(desc(`Total Votes`)) |>
+  datatable(
+    rownames = FALSE,
+    options = list(pageLength = 10, scrollX = TRUE)
+  ) |>
+  formatCurrency("Total Votes", currency = "", interval = 3, mark = ",", digits = 0)
+```
+
+:::

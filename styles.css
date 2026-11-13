@@ -1,1 +1,38 @@
-/* css styles */
+/* Election dashboard cards */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  background: #181c24;
+  color: #f8f9fa;
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+  border-left: 5px solid #3b82f6;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.stat-card.turnout {
+  border-left-color: #f59e0b;
+}
+
+.stat-label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9ca3af;
+}
+
+.stat-value {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin: 0.25rem 0;
+}
+
+.stat-sub {
+  font-size: 0.85rem;
+  color: #d1d5db;
+}
